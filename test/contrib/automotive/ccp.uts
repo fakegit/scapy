@@ -4,12 +4,8 @@
 ~ conf
 
 = Imports
-import scapy.modules.six as six
 
-if six.PY3:
-    exec(open("test/contrib/automotive/interface_mockup.py").read())
-else:
-    execfile("test/contrib/automotive/interface_mockup.py")
+from test.testsocket import TestSocket, cleanup_testsockets
 
 ############
 ############
@@ -18,6 +14,11 @@ else:
 
 = Load module
 load_contrib("automotive.ccp", globals_dict=globals())
+
+= Reject a DTO without the five-byte response body
+cro = CCP(identifier=0x700)/CRO(cmd=0x1b, ctr=0x5a)/GET_CCP_VERSION()
+dto = CCP(bytes.fromhex("0000070003000000ff005a"))
+assert not dto.answers(cro)
 
 = Build CRO CONNECT
 
@@ -881,23 +882,24 @@ assert dto.hashret() == cro.hashret()
 
 + Tests on a virtual CAN-Bus
 
-= CAN Socket sr1 with dto.ansers(cro) == True
+= CAN Socket sr1 with dto.answers(cro) == True
 
-with new_can_socket0() as sock1, new_can_socket0() as sock2:
-    sock1.basecls = CCP
-    started = threading.Event()
-    def ecu():
-        pkts = sock2.sniff(count=1, timeout=1, started_callback=started.set)
-        if len(pkts) == 1:
-            cro = CRO(pkts[0].data)
-            assert cro.cmd == 0x22
-            assert cro.data == b"\x10\x11\x12\x10\x11\x12"
-            sock2.send(CCP(b'\x00\x00\x07\x00\x08\x00\x00\x00\xff\x00\x53\x02\x34\x00\x20\x06'))
-    thread = threading.Thread(target=ecu)
-    thread.start()
-    started.wait(timeout=5)
-    dto = sock1.sr1(CCP(identifier=0x700)/CRO(ctr=0x53)/PROGRAM_6(data=b"\x10\x11\x12\x10\x11\x12"), timeout=1)
-    thread.join(timeout=5)
+sock1 = TestSocket(CCP)
+sock2 = TestSocket(CAN)
+sock1.pair(sock2)
+
+def answer(pkt):
+    cro = CRO(pkt.data)
+    assert cro.cmd == 0x22
+    assert cro.data == b"\x10\x11\x12\x10\x11\x12"
+    sock2.send(CCP(b'\x00\x00\x07\x00\x08\x00\x00\x00\xff\x00\x53\x02\x34\x00\x20\x06'))
+
+sniffer = AsyncSniffer(opened_socket=sock2, count=1, prn=answer)
+sniffer.start()
+dto = sock1.sr1(CCP(identifier=0x700)/CRO(ctr=0x53)/PROGRAM_6(data=b"\x10\x11\x12\x10\x11\x12"), timeout=1, verbose=False)
+sniffer.join(timeout=5)
+sock1.close()
+sock2.close()
 
 assert dto.ctr == 83
 assert dto.packet_id == 0xff
@@ -906,46 +908,45 @@ assert hasattr(dto, "load") == False
 assert dto.MTA0_extension == 2
 assert dto.MTA0_address == 0x34002006
 
-= CAN Socket sr1 with dto.ansers(cro) == False
+= CAN Socket sr1 with dto.answers(cro) == False
 
-with new_can_socket0() as sock1, new_can_socket0() as sock2:
-    sock1.basecls = CCP
-    started = threading.Event()
-    def ecu():
-        pkts = sock2.sniff(count=1, timeout=1, started_callback=started.set)
-        if len(pkts) == 1:
-            cro = CRO(pkts[0].data)
-            assert cro.cmd == 0x22
-            assert cro.data == b"\x10\x11\x12\x10\x11\x12"
-            sock2.send(CCP(b'\x00\x00\x07\x00\x08\x00\x00\x00\xff\x00\x55\x02\x34\x00\x20\x06'))
-    thread = threading.Thread(target=ecu)
-    thread.start()
-    started.wait(timeout=5)
-    gotTimeout = False
-    dto = sock1.sr1(CCP(identifier=0x700)/CRO(ctr=0x54)/PROGRAM_6(data=b"\x10\x11\x12\x10\x11\x12"), timeout=1)
-    print(dto)
-    if dto is None:
-        gotTimeout = True
-    assert gotTimeout
-    thread.join(timeout=5)
+sock1 = TestSocket(CCP)
+sock2 = TestSocket(CAN)
+sock1.pair(sock2)
+
+def answer(pkt):
+    cro = CRO(pkt.data)
+    assert cro.cmd == 0x22
+    assert cro.data == b"\x10\x11\x12\x10\x11\x12"
+    sock2.send(CCP(b'\x00\x00\x07\x00\x08\x00\x00\x00\xff\x00\x55\x02\x34\x00\x20\x06'))
+
+sniffer = AsyncSniffer(opened_socket=sock2, count=1, prn=answer)
+sniffer.start()
+dto = sock1.sr1(CCP(identifier=0x700)/CRO(ctr=0x54)/PROGRAM_6(data=b"\x10\x11\x12\x10\x11\x12"), timeout=0.1, verbose=False)
+sniffer.join(timeout=5)
+sock1.close()
+sock2.close()
+assert dto is None
+
 
 = CAN Socket sr1 with error code
 
-with new_can_socket0() as sock1, new_can_socket0() as sock2:
-    sock1.basecls = CCP
-    started = threading.Event()
-    def ecu():
-        pkts = sock2.sniff(count=1, timeout=1, started_callback=started.set)
-        if len(pkts) == 1:
-            cro = CRO(pkts[0].data)
-            assert cro.cmd == 0x22
-            assert cro.data == b"\x10\x11\x12\x10\x11\x12"
-            sock2.send(CCP(b'\x00\x00\x07\x00\x08\x00\x00\x00\xff\x01\x55\xff\xff\xff\xff\xff'))
-    thread = threading.Thread(target=ecu)
-    thread.start()
-    started.wait(timeout=5)
-    dto = sock1.sr1(CCP(identifier=0x700)/CRO(ctr=0x55)/PROGRAM_6(data=b"\x10\x11\x12\x10\x11\x12"), timeout=1)
-    thread.join(timeout=5)
+sock1 = TestSocket(CCP)
+sock2 = TestSocket(CAN)
+sock1.pair(sock2)
+
+def answer(pkt):
+    cro = CRO(pkt.data)
+    assert cro.cmd == 0x22
+    assert cro.data == b"\x10\x11\x12\x10\x11\x12"
+    sock2.send(CCP(b'\x00\x00\x07\x00\x08\x00\x00\x00\xff\x01\x55\xff\xff\xff\xff\xff'))
+
+sniffer = AsyncSniffer(opened_socket=sock2, count=1, prn=answer)
+sniffer.start()
+dto = sock1.sr1(CCP(identifier=0x700)/CRO(ctr=0x55)/PROGRAM_6(data=b"\x10\x11\x12\x10\x11\x12"), timeout=1, verbose=False)
+sniffer.join(timeout=5)
+sock1.close()
+sock2.close()
 
 assert dto.ctr == 85
 assert dto.packet_id == 0xff
@@ -956,7 +957,7 @@ assert dto.MTA0_address == 0xffffffff
 
 + Cleanup
 
-= Delete vcan interfaces
+= Delete TestSockets
 
-assert cleanup_interfaces()
+cleanup_testsockets()
 

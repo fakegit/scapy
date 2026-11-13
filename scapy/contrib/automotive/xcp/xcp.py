@@ -1,11 +1,23 @@
+# SPDX-License-Identifier: GPL-2.0-only
 # This file is part of Scapy
-# See http://www.secdev.org/projects/scapy for more information
+# See https://scapy.net/ for more information
 # Copyright (C) Nils Weiss <nils@we155.de>
 # Copyright (C) Tabea Spahn <tabea.spahn@e-mundo.de>
-# This program is published under a GPLv2 license
 
 # scapy.contrib.description = Universal calibration and measurement protocol (XCP) # noqa: E501
 # scapy.contrib.status = loads
+
+"""
+Universal calibration and measurement protocol (XCP)
+
+When using this module, one must at least define the following values:
+
+    >>> # These are example values, please change them to your setup.
+    >>> conf.contribs["XCP"]["MAX_CTO"] = 255
+    >>> conf.contribs["XCP"]["MAX_DTO"] = 65535
+    >>> conf.contribs["XCP"]["Address_Granularity_Byte"] = 4
+"""
+
 import struct
 
 from scapy.config import conf
@@ -96,7 +108,7 @@ class XCPOnCAN(CAN):
         return super(XCPOnCAN, self).post_build(pkt, pay)
 
     def extract_padding(self, p):
-        return p, None
+        return p[:self.length], None
 
 
 class XCPOnUDP(UDP):

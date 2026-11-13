@@ -1,15 +1,13 @@
+# SPDX-License-Identifier: GPL-2.0-only
 # This file is part of Scapy
-# See http://www.secdev.org/projects/scapy for more information
+# See https://scapy.net/ for more information
 # Copyright (C) Philippe Biondi <phil@secdev.org>
-# This program is published under a GPLv2 license
-
 # Copyright (C) 2005  Guillaume Valadon <guedou@hongo.wide.ad.jp>
 #                     Arnaud Ebalard <arnaud.ebalard@eads.net>
 
 """
 Utility functions for IPv6.
 """
-from __future__ import absolute_import
 import socket
 import struct
 import time
@@ -19,14 +17,18 @@ from scapy.base_classes import Net
 from scapy.data import IPV6_ADDR_GLOBAL, IPV6_ADDR_LINKLOCAL, \
     IPV6_ADDR_SITELOCAL, IPV6_ADDR_LOOPBACK, IPV6_ADDR_UNICAST,\
     IPV6_ADDR_MULTICAST, IPV6_ADDR_6TO4, IPV6_ADDR_UNSPECIFIED
-from scapy.utils import strxor
-from scapy.compat import orb, chb
+from scapy.utils import (
+    strxor,
+    stror,
+    strand,
+)
+from scapy.compat import chb
 from scapy.pton_ntop import inet_pton, inet_ntop
 from scapy.volatile import RandMAC, RandBin
 from scapy.error import warning, Scapy_Exception
 from functools import reduce, cmp_to_key
 
-from scapy.compat import (
+from typing import (
     Iterator,
     List,
     Optional,
@@ -87,6 +89,8 @@ def construct_source_candidate_set(
             cset = (x for x in laddr if x[1] == IPV6_ADDR_SITELOCAL)
     elif addr == '::' and plen == 0:
         cset = (x for x in laddr if x[1] == IPV6_ADDR_GLOBAL)
+    elif addr == '::1':
+        cset = (x for x in laddr if x[1] == IPV6_ADDR_LOOPBACK)
     addrs = [x[0] for x in cset]
     # TODO convert the cmd use into a key
     addrs.sort(key=cmp_to_key(cset_sort))  # Sort with global addresses first
@@ -188,11 +192,11 @@ def in6_getAddrType(addr):
     addrType = 0
     # _Assignable_ Global Unicast Address space
     # is defined in RFC 3513 as those in 2000::/3
-    if ((orb(naddr[0]) & 0xE0) == 0x20):
+    if ((naddr[0] & 0xE0) == 0x20):
         addrType = (IPV6_ADDR_UNICAST | IPV6_ADDR_GLOBAL)
         if naddr[:2] == b' \x02':  # Mark 6to4 @
             addrType |= IPV6_ADDR_6TO4
-    elif orb(naddr[0]) == 0xff:  # multicast
+    elif naddr[0] == 0xff:  # multicast
         addrScope = paddr[3]
         if addrScope == '2':
             addrType = (IPV6_ADDR_LINKLOCAL | IPV6_ADDR_MULTICAST)
@@ -200,7 +204,7 @@ def in6_getAddrType(addr):
             addrType = (IPV6_ADDR_GLOBAL | IPV6_ADDR_MULTICAST)
         else:
             addrType = (IPV6_ADDR_GLOBAL | IPV6_ADDR_MULTICAST)
-    elif ((orb(naddr[0]) == 0xfe) and ((int(paddr[2], 16) & 0xC) == 0x8)):
+    elif ((naddr[0] == 0xfe) and ((int(paddr[2], 16) & 0xC) == 0x8)):
         addrType = (IPV6_ADDR_UNICAST | IPV6_ADDR_LINKLOCAL)
     elif paddr == "::1":
         addrType = IPV6_ADDR_LOOPBACK
@@ -261,7 +265,7 @@ def in6_ifaceidtomac(ifaceid_s):
     oui = first + ifaceid[1:3]
     end = ifaceid[5:]
     # Convert and reconstruct into a MAC Address
-    mac_bytes = ["%.02x" % orb(x) for x in list(oui + end)]
+    mac_bytes = ["%.02x" % x for x in list(oui + end)]
     return ":".join(mac_bytes)
 
 
@@ -422,7 +426,7 @@ def in6_getLocalUniquePrefix():
     btod = struct.pack("!II", i, j)
     mac = RandMAC()
     # construct modified EUI-64 ID
-    eui64 = inet_pton(socket.AF_INET6, '::' + in6_mactoifaceid(mac))[8:]
+    eui64 = inet_pton(socket.AF_INET6, '::' + in6_mactoifaceid(str(mac)))[8:]
     import hashlib
     globalid = hashlib.sha1(btod + eui64).digest()[:5]
     return inet_ntop(socket.AF_INET6, b'\xfd' + globalid + b'\x00' * 10)
@@ -457,7 +461,7 @@ def in6_getRandomizedIfaceId(ifaceid, previous=None):
     import hashlib
     s = hashlib.md5(s).digest()
     s1, s2 = s[:8], s[8:]
-    s1 = chb(orb(s1[0]) & (~0x04)) + s1[1:]  # set bit 6 to 0
+    s1 = chb(s1[0] & (~0x04)) + s1[1:]  # set bit 6 to 0
     bs1 = inet_ntop(socket.AF_INET6, b"\xff" * 8 + s1)[20:]
     bs2 = inet_ntop(socket.AF_INET6, b"\xff" * 8 + s2)[20:]
     return (bs1, bs2)
@@ -591,18 +595,6 @@ def in6_isanycast(x):  # RFC 2526
         return False
 
 
-def _in6_bitops(xa1, xa2, operator=0):
-    # type: (bytes, bytes, int) -> bytes
-    a1 = struct.unpack('4I', xa1)
-    a2 = struct.unpack('4I', xa2)
-    fop = [lambda x, y: x | y,
-           lambda x, y: x & y,
-           lambda x, y: x ^ y
-           ]
-    ret = map(fop[operator % len(fop)], a1, a2)
-    return b"".join(struct.pack('I', x) for x in ret)
-
-
 def in6_or(a1, a2):
     # type: (bytes, bytes) -> bytes
     """
@@ -610,7 +602,7 @@ def in6_or(a1, a2):
     passed in network format. Return value is also an IPv6 address
     in network format.
     """
-    return _in6_bitops(a1, a2, 0)
+    return stror(a1, a2)
 
 
 def in6_and(a1, a2):
@@ -620,7 +612,7 @@ def in6_and(a1, a2):
     passed in network format. Return value is also an IPv6 address
     in network format.
     """
-    return _in6_bitops(a1, a2, 1)
+    return strand(a1, a2)
 
 
 def in6_xor(a1, a2):
@@ -630,7 +622,7 @@ def in6_xor(a1, a2):
     passed in network format. Return value is also an IPv6 address
     in network format.
     """
-    return _in6_bitops(a1, a2, 2)
+    return strxor(a1, a2)
 
 
 def in6_cidr2mask(m):
@@ -650,6 +642,22 @@ def in6_cidr2mask(m):
         m -= 32
 
     return b"".join(struct.pack('!I', x) for x in t)
+
+
+def in6_mask2cidr(m):
+    # type: (bytes) -> int
+    """
+    Opposite of in6_cidr2mask
+    """
+    if len(m) != 16:
+        raise Scapy_Exception("value must be 16 octets long")
+
+    for i in range(0, 4):
+        s = struct.unpack('!I', m[i * 4:(i + 1) * 4])[0]
+        for j in range(32):
+            if not s & (1 << (31 - j)):
+                return i * 32 + j
+    return 128
 
 
 def in6_getnsma(a):
@@ -887,7 +895,7 @@ def in6_get_common_plen(a, b):
     tmpA = inet_pton(socket.AF_INET6, a)
     tmpB = inet_pton(socket.AF_INET6, b)
     for i in range(16):
-        mbits = matching_bits(orb(tmpA[i]), orb(tmpB[i]))
+        mbits = matching_bits(tmpA[i], tmpB[i])
         if mbits != 8:
             return 8 * i + mbits
     return 128

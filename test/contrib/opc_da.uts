@@ -15,7 +15,7 @@ OpcDaHeaderMessage (versionMajor=5,versionMinor=0,pduType=0, \
     versionMajor=0,versionMinor=0,stubdata='')))
 elem2 = raw(opcdaRequestPacket_Build)
 
-assert( elem1 == elem2 )
+assert  elem1 == elem2
 
 = OpcDaRequestLE
 opcdaRequestLEPacket_Dissect = hex_bytes(b'050000831000000064000000150000003c000000060005001dc400009c0a0000d7028c761299f7bf000000000000000000000000512d4e34ab431449a2cf7784b21b3ea1')
@@ -32,7 +32,7 @@ OpcDaHeaderMessage (versionMajor=5,versionMinor=0,pduType=0, \
     stubdata=b'\x00\x00\x00\x00\x00\x00\x00\x00Q-N4\xabC\x14I\xa2\xcfw\x84\xb2\x1b>\xa1')))
 elem2 = raw(opcdaRequestLEPacket_Build)
 
-assert( elem1 == elem2 )
+assert  elem1 == elem2
 
 
 + Test Ping Packet
@@ -48,7 +48,7 @@ opcdaPingPacket_Build = OpcDaMessage(OpcDaMessage= \
     / OpcDaPing()) / '\x00'
 elem2 = raw(opcdaPingPacket_Build)
 
-assert( elem1 == elem2 )
+assert  elem1 == elem2
 
 
 + Test Response Packets
@@ -65,7 +65,7 @@ opcDaResponsePacket_Build = OpcDaMessage(OpcDaMessage= \
         stubData=b'0'*(212-32)))
 elem2 = raw(opcDaResponsePacket_Build)
 
-assert( elem1 == elem2 )
+assert  elem1 == elem2
 
 = OpcDaResponseLE
 opcDaResponseLEPacket_Dissect = hex_bytes(b'0500020310000000d400000015000000bc00000006000000303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030')
@@ -80,7 +80,7 @@ opcDaResponseLEPacket_Build = OpcDaMessage(OpcDaMessage= \
         stubData=b'0'*(212-32)))
 elem2 = raw(opcDaResponseLEPacket_Build)
 
-assert( elem1 == elem2 )
+assert  elem1 == elem2
 
 # + Test Fault Packet
 # No example yet
@@ -110,9 +110,30 @@ assert( elem1 == elem2 )
 # OpcDaCl_cancel
 # OpcDaCl_cancelLE
 
-# + Test Fack Packet
-# No example yet
-# OpcDaFack
++ Test Fack Packet
+= OpcDaFack
+opcDaFackPacket_Dissect = hex_bytes(b'0000000010000010000000080000010002aaaaaaaabbbbbbbb')
+fack = OpcDaFack(opcDaFackPacket_Dissect)
+assert fack.selackLen == 2
+assert fack.selack == [0xaaaaaaaa, 0xbbbbbbbb]
+assert raw(fack) == opcDaFackPacket_Dissect
+
+= OpcDaFackLE
+fackLE = OpcDaFackLE(opcDaFackPacket_Dissect)
+assert len(fackLE.selack) == 2
+assert raw(fackLE) == opcDaFackPacket_Dissect
+
+= OpcDaFack selackLen counts selack when building
+fack = OpcDaFack(raw(OpcDaFack(selack=[0xaaaaaaaa, 0xbbbbbbbb])))
+assert fack.selackLen == 2
+assert fack.selack == [0xaaaaaaaa, 0xbbbbbbbb]
+fackLE = OpcDaFackLE(raw(OpcDaFackLE(selack=[1])))
+assert fackLE.selackLen == 1 and fackLE.selack == [1]
+
+= OpcDaFack selackLen matches the entries written for selack=None
+data = raw(OpcDaFack(selack=None))
+assert OpcDaFack(data).selackLen == (len(data) - len(raw(OpcDaFack()))) // 4
+assert raw(OpcDaFack()) == raw(OpcDaFack(selack=[]))
 
 # + Test Cancel ack Packet
 # No example yet
@@ -180,3 +201,12 @@ elem2 = raw(ocDaAlter_contextLEPacket_Build)
 # + Test Orphaned Packet
 # No example yet
 # OpcDaOrphaned
+
++ Test STDOBJREF
+= STDOBJREF dissection
+stdObjRef_Dissect = hex_bytes(b'0100000002000000112233445566778899aabbccddeeff000102030405060708090a0b0c0d0e0f10')
+std = STDOBJREF(stdObjRef_Dissect)
+assert std.flags == 1
+assert std.cPublicRefs == 2
+assert str(std.IPID) == '04030201-0605-0807-090a-0b0c0d0e0f10'
+assert raw(std) == stdObjRef_Dissect

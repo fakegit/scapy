@@ -1,32 +1,33 @@
+# SPDX-License-Identifier: GPL-2.0-only
 # This file is part of Scapy
-# See http://www.secdev.org/projects/scapy for more information
+# See https://scapy.net/ for more information
 # Copyright (C) Philippe Biondi <phil@secdev.org>
-# This program is published under a GPLv2 license
 
 """
 Functions common to different architectures
 """
 
-import ctypes
+import re
 import socket
-import struct
-from scapy.consts import WINDOWS
+
 from scapy.config import conf
-from scapy.data import MTU, ARPHDR_ETHER, ARPHRD_TO_DLT
-from scapy.error import Scapy_Exception
-from scapy.interfaces import network_name, NetworkInterface
-from scapy.libs.structures import bpf_program
+from scapy.data import MTU, ARPHRD_TO_DLT, DLT_RAW_ALT, DLT_RAW
+from scapy.error import Scapy_Exception, warning
+from scapy.interfaces import network_name, resolve_iface, NetworkInterface
+from scapy.pton_ntop import inet_pton
+from scapy.utils import decode_locale_str
 
 # Type imports
 import scapy
-from scapy.compat import (
+from typing import (
+    List,
     Optional,
-    Tuple,
+    TYPE_CHECKING,
     Union,
 )
 
-if not WINDOWS:
-    from fcntl import ioctl
+if TYPE_CHECKING:
+    from scapy.libs.structures import bpf_program
 
 # From if.h
 _iff_flags = [
@@ -39,7 +40,6 @@ _iff_flags = [
     "RUNNING",
     "NOARP",
     "PROMISC",
-    "NOTRAILERS",
     "ALLMULTI",
     "MASTER",
     "SLAVE",
@@ -52,40 +52,14 @@ _iff_flags = [
     "ECHO"
 ]
 
-# UTILS
 
-
-def get_if(iff, cmd):
-    # type: (Union[NetworkInterface, str], int) -> bytes
-    """Ease SIOCGIF* ioctl calls"""
-
-    iff = network_name(iff)
-    sck = socket.socket()
-    try:
-        return ioctl(sck, cmd, struct.pack("16s16x", iff.encode("utf8")))
-    finally:
-        sck.close()
-
-
-def get_if_raw_hwaddr(iff,  # type: Union[NetworkInterface, str]
-                      siocgifhwaddr=None,  # type: Optional[int]
-                      ):
-    # type: (...) -> Tuple[int, bytes]
-    """Get the raw MAC address of a local interface.
-
-    This function uses SIOCGIFHWADDR calls, therefore only works
-    on some distros.
-
-    :param iff: the network interface name as a string
-    :returns: the corresponding raw MAC address
-    """
-    if siocgifhwaddr is None:
-        from scapy.arch import SIOCGIFHWADDR  # type: ignore
-        siocgifhwaddr = SIOCGIFHWADDR
-    return struct.unpack(  # type: ignore
-        "16xh6s8x",
-        get_if(iff, siocgifhwaddr)
-    )
+def get_if_raw_addr(iff):
+    # type: (Union[NetworkInterface, str]) -> bytes
+    """Return the raw IPv4 address of interface"""
+    iff = resolve_iface(iff)
+    if not iff.ip:
+        return b"\x00" * 4
+    return inet_pton(socket.AF_INET, iff.ip)
 
 
 # BPF HANDLERS
@@ -96,7 +70,7 @@ def compile_filter(filter_exp,  # type: str
                    linktype=None,  # type: Optional[int]
                    promisc=False  # type: bool
                    ):
-    # type: (...) -> bpf_program
+    # type: (...) -> 'bpf_program'
     """Asks libpcap to parse the filter, then build the matching
     BPF bytecode.
 
@@ -104,11 +78,19 @@ def compile_filter(filter_exp,  # type: str
     :param linktype: if provided, use the linktype to compile
     """
     try:
+        import ctypes
+    except OSError:
+        raise ImportError(
+            "ctypes is not available. Cannot compile filter !"
+        )
+    from scapy.libs.structures import bpf_program
+    try:
         from scapy.libs.winpcapy import (
             PCAP_ERRBUF_SIZE,
             pcap_open_live,
+            pcap_open_dead,
             pcap_compile,
-            pcap_compile_nopcap,
+            pcap_geterr,
             pcap_close
         )
     except OSError:
@@ -128,32 +110,75 @@ def compile_filter(filter_exp,  # type: str
             iface = conf.iface
         # Try to guess linktype to avoid requiring root
         try:
-            arphd = get_if_raw_hwaddr(iface)[0]
+            arphd = resolve_iface(iface).type
             linktype = ARPHRD_TO_DLT.get(arphd)
         except Exception:
             # Failed to use linktype: use the interface
             pass
-        if not linktype and conf.use_bpf:
-            linktype = ARPHDR_ETHER
     if linktype is not None:
-        ret = pcap_compile_nopcap(
-            MTU, linktype, ctypes.byref(bpf), bpf_filter, 0, -1
-        )
+        # Some conversion aliases (e.g. linktype_to_dlt in libpcap)
+        if linktype == DLT_RAW_ALT:
+            linktype = DLT_RAW
+        # Use a "dead" capture handle (no interface / no root required) so that,
+        # on failure, the libpcap error message can be retrieved with pcap_geterr
+        pcap = pcap_open_dead(linktype, MTU)
     elif iface:
         err = create_string_buffer(PCAP_ERRBUF_SIZE)
         iface_b = create_string_buffer(network_name(iface).encode("utf8"))
         pcap = pcap_open_live(
             iface_b, MTU, promisc, 0, err
         )
-        error = bytes(bytearray(err)).strip(b"\x00")
+        error = decode_locale_str(bytearray(err).strip(b"\x00"))
         if error:
             raise OSError(error)
-        ret = pcap_compile(
-            pcap, ctypes.byref(bpf), bpf_filter, 0, -1
+    else:
+        raise Scapy_Exception("Please provide an interface or linktype!")
+    ret = pcap_compile(
+        pcap, ctypes.byref(bpf), bpf_filter, 1, -1
+    )
+    if ret == -1:
+        # Retrieve the underlying libpcap error message: it explains why the
+        # filter is invalid or incompatible with the link-layer type
+        errstr = decode_locale_str(
+            bytearray(pcap_geterr(pcap)).strip(b"\x00")
         )
         pcap_close(pcap)
-    if ret == -1:
         raise Scapy_Exception(
-            "Failed to compile filter expression %s (%s)" % (filter_exp, ret)
+            "Failed to compile filter expression %r (%s)" % (filter_exp, errstr)
         )
+    pcap_close(pcap)
     return bpf
+
+
+def free_filter(bp: 'bpf_program') -> None:
+    """
+    Free a bpf_program created with compile_filter
+    """
+    try:
+        import ctypes
+    except OSError:
+        raise ImportError(
+            "ctypes is not available. Cannot free filter !"
+        )
+    try:
+        from scapy.libs.winpcapy import pcap_freecode
+    except OSError:
+        raise ImportError(
+            "libpcap is not available. Cannot free filter !"
+        )
+    pcap_freecode(ctypes.byref(bp))
+
+
+#######
+# DNS #
+#######
+
+def read_nameservers() -> List[str]:
+    """Return the nameservers configured by the OS
+    """
+    try:
+        with open('/etc/resolv.conf', 'r') as fd:
+            return re.findall(r"nameserver\s+([^\s]+)", fd.read())
+    except FileNotFoundError:
+        warning("Could not retrieve the OS's nameserver !")
+        return []
